@@ -38,7 +38,7 @@ One click fills all remaining empty slots. The AI consultant analyses your curre
 
 ### Saved Teams
 
-![Saved Teams](readme-images/DATABASE.png)
+![Saved Teams](readme-images/save-team.png)
 
 Save any team with a custom name. Load a saved team back into the builder, or delete ones you no longer need. Teams are tied to your account.
 
