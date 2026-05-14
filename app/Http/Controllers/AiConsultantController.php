@@ -75,13 +75,14 @@ class AiConsultantController extends Controller
         $emptySlots = 6 - count($names);
 
         $prompt = "You are a Pokémon team building consultant. A trainer has the following team:\n\n"
-            . "Current team ({$emptySlots} empty slots): {$teamSummary}\n\n"
+            . "Current team: {$teamSummary}\n\n"
             . "Biggest defensive gaps (types with unresisted weaknesses): {$gapSummary}\n\n"
-            . "Suggest exactly ONE Pokémon (from generations 1-9) to add to this team to best cover the defensive gaps. "
-            . "The Pokémon must exist in the official Pokédex. "
-            . "Respond in this exact JSON format only, with no extra text:\n"
-            . "{\"name\": \"pokemon-name-in-lowercase\", \"reason\": \"Brief 1-2 sentence explanation\"}\n\n"
-            . "Important: Use the exact lowercase Pokémon name as it appears in PokéAPI (e.g., 'garchomp', 'rotom-wash', 'mr-mime').";
+            . "The trainer needs exactly {$emptySlots} more Pokémon to complete their team of 6.\n"
+            . "Suggest exactly {$emptySlots} DIFFERENT Pokémon (from generations 1-9) that best complement this team.\n"
+            . "Each suggestion must cover different defensive gaps. Do not repeat any Pokémon already on the team.\n\n"
+            . "Respond with ONLY this JSON object, no markdown, no extra text:\n"
+            . "{\"suggestions\":[{\"name\":\"pokemon-name\",\"reason\":\"1-2 sentence explanation\"}]}\n\n"
+            . "Use exact lowercase PokéAPI names (e.g. 'garchomp', 'rotom-wash', 'mr-mime').";
 
         try {
             $apiKey = config('services.aiml.key');
@@ -102,63 +103,65 @@ class AiConsultantController extends Controller
                         'content' => $prompt,
                     ],
                 ],
-                'temperature' => 0.7,
-                'max_tokens' => 200,
+                'response_format' => ['type' => 'json_object'],
+                'temperature' => 0.3,
+                'max_tokens' => min(800, $emptySlots * 150 + 100),
             ]);
+
+            if (!$response->ok()) {
+                \Log::error('AI Consultant API error', [
+                    'status' => $response->status(),
+                    'body'   => $response->body(),
+                ]);
+            }
 
             if ($response->ok()) {
                 $content = $response->json('choices.0.message.content', '');
-                
-                // Extract JSON from the response (handle markdown code blocks)
+
                 $content = trim($content);
                 if (str_starts_with($content, '```')) {
                     $content = preg_replace('/^```(?:json)?\s*/i', '', $content);
                     $content = preg_replace('/\s*```$/', '', $content);
                 }
-                
-                $suggestion = json_decode($content, true);
 
-                if ($suggestion && isset($suggestion['name'])) {
-                    return response()->json([
-                        'suggestion' => [
-                            'name' => strtolower(trim($suggestion['name'])),
-                            'reason' => $suggestion['reason'] ?? 'Great coverage addition for your team.',
-                        ],
-                    ]);
+                $data = json_decode($content, true);
+
+                if ($data && isset($data['suggestions']) && is_array($data['suggestions'])) {
+                    $suggestions = array_values(array_filter(
+                        array_map(function ($s) {
+                            if (!isset($s['name'])) return null;
+                            return [
+                                'name' => strtolower(trim($s['name'])),
+                                'reason' => $s['reason'] ?? 'Great coverage addition for your team.',
+                            ];
+                        }, $data['suggestions'])
+                    ));
+
+                    if (!empty($suggestions)) {
+                        return response()->json(['suggestions' => $suggestions]);
+                    }
                 }
             }
 
             // Fallback if AI response is unparseable
             return response()->json([
-                'suggestion' => [
-                    'name' => $this->getFallbackSuggestion($allWeaknesses, $allResistances),
-                    'reason' => 'AI response could not be parsed. This is a rule-based suggestion to cover your biggest weakness.',
-                ],
+                'suggestions' => $this->getFallbackSuggestions($allWeaknesses, $allResistances, $emptySlots),
             ]);
 
         } catch (\Exception $e) {
             \Log::error('AI Consultant error: ' . $e->getMessage());
 
             return response()->json([
-                'suggestion' => [
-                    'name' => $this->getFallbackSuggestion($allWeaknesses, $allResistances),
-                    'reason' => 'AI service unavailable. This is a rule-based fallback suggestion.',
-                ],
+                'suggestions' => $this->getFallbackSuggestions($allWeaknesses, $allResistances, $emptySlots),
             ]);
         }
     }
 
-    /**
-     * Rule-based fallback: suggest a Pokémon that resists the team's biggest weakness.
-     */
-    private function getFallbackSuggestion(array $weaknesses, array $resistances): string
+    private function getFallbackSuggestions(array $weaknesses, array $resistances, int $count): array
     {
-        // Find the most common unresisted weakness
         arsort($weaknesses);
-        $biggestWeakness = array_key_first($weaknesses);
 
-        // Map weakness type to a good defensive Pokémon
-        $suggestions = [
+        $pool = [
             'fire' => 'vaporeon',
             'water' => 'ferrothorn',
             'grass' => 'heatran',
@@ -171,14 +174,35 @@ class AiConsultantController extends Controller
             'psychic' => 'bisharp',
             'bug' => 'talonflame',
             'rock' => 'lucario',
-            'ghost' => 'tyranitar',
+            'ghost' => 'gengar',
             'dragon' => 'clefable',
-            'dark' => 'lucario',
+            'dark' => 'umbreon',
             'steel' => 'volcarona',
-            'fairy' => 'excadrill',
-            'normal' => 'gengar',
+            'fairy' => 'magnezone',
+            'normal' => 'alakazam',
         ];
 
-        return $suggestions[$biggestWeakness] ?? 'garchomp';
+        $defaults = ['garchomp', 'ferrothorn', 'rotom-wash', 'togekiss', 'excadrill', 'heatran'];
+
+        $chosen = [];
+        foreach (array_keys($weaknesses) as $type) {
+            if (count($chosen) >= $count) break;
+            $name = $pool[$type] ?? null;
+            if ($name && !in_array($name, $chosen)) {
+                $chosen[] = $name;
+            }
+        }
+
+        foreach ($defaults as $name) {
+            if (count($chosen) >= $count) break;
+            if (!in_array($name, $chosen)) {
+                $chosen[] = $name;
+            }
+        }
+
+        return array_map(fn($name) => [
+            'name' => $name,
+            'reason' => 'Rule-based suggestion to cover your team\'s biggest defensive gap.',
+        ], array_slice($chosen, 0, $count));
     }
 }

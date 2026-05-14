@@ -2,7 +2,7 @@ import AuthenticatedLayout from '@/Layouts/AuthenticatedLayout';
 import { Head, router } from '@inertiajs/react';
 import { useState, useEffect } from 'react';
 import axios from 'axios';
-import TypeBadge from '@/Components/TypeBadge';
+import TypeBadge, { TYPE_HEX } from '@/Components/TypeBadge';
 import PokemonSelectorModal from '@/Components/PokemonSelectorModal';
 
 export default function Dashboard({ auth, loadTeam }) {
@@ -18,7 +18,7 @@ export default function Dashboard({ auth, loadTeam }) {
 
     // AI Autofill State
     const [aiLoading, setAiLoading] = useState(false);
-    const [aiSuggestion, setAiSuggestion] = useState(null);
+    const [aiSuggestions, setAiSuggestions] = useState(null);
 
     // Load team from saved teams page
     useEffect(() => {
@@ -88,35 +88,36 @@ export default function Dashboard({ auth, loadTeam }) {
     const handleAiAutofill = () => {
         const activeMembers = team.filter(p => p !== null);
         if (activeMembers.length === 0) return alert('Add at least one Pokémon before consulting the AI!');
-        
-        const emptyIdx = team.findIndex(p => p === null);
-        if (emptyIdx === -1) return alert('Your team is full! Remove a Pokémon to get a suggestion.');
+        if (team.every(p => p !== null)) return alert('Your team is full! Remove a Pokémon to get a suggestion.');
 
         setAiLoading(true);
-        setAiSuggestion(null);
+        setAiSuggestions(null);
 
         axios.post('/ai-suggest', { pokemon_names: activeMembers.map(m => m.name) })
             .then(async (res) => {
-                const suggestion = res.data.suggestion;
-                setAiSuggestion(suggestion);
+                const suggestions = res.data.suggestions ?? [];
 
-                // Try to auto-add the suggestion to the first empty slot
-                if (suggestion?.name) {
-                    try {
-                        const pokeRes = await fetch(`https://pokeapi.co/api/v2/pokemon/${suggestion.name.toLowerCase()}`);
-                        if (pokeRes.ok) {
-                            const pokeData = await pokeRes.json();
-                            const newTeam = [...team];
-                            const slotIdx = newTeam.findIndex(p => p === null);
-                            if (slotIdx !== -1) {
-                                newTeam[slotIdx] = { id: pokeData.id, name: pokeData.name };
-                                setTeam(newTeam);
-                            }
-                        }
-                    } catch (e) {
-                        console.error('Could not auto-add suggestion:', e);
-                    }
+                const fetched = await Promise.all(
+                    suggestions.map(s =>
+                        fetch(`https://pokeapi.co/api/v2/pokemon/${s.name.toLowerCase()}`)
+                            .then(r => r.ok ? r.json() : null)
+                            .catch(() => null)
+                    )
+                );
+
+                const newTeam = [...team];
+                const filled = [];
+                for (let i = 0; i < fetched.length; i++) {
+                    const pokeData = fetched[i];
+                    if (!pokeData) continue;
+                    const slotIdx = newTeam.findIndex(p => p === null);
+                    if (slotIdx === -1) break;
+                    newTeam[slotIdx] = { id: pokeData.id, name: pokeData.name };
+                    filled.push(suggestions[i]);
                 }
+
+                setTeam(newTeam);
+                if (filled.length > 0) setAiSuggestions(filled);
                 setAiLoading(false);
             })
             .catch(err => {
@@ -180,25 +181,32 @@ export default function Dashboard({ auth, loadTeam }) {
                     )}
 
                     {/* ── AI Suggestion Card ── */}
-                    {aiSuggestion && (
+                    {aiSuggestions && (
                         <div className="mb-6 bg-gradient-to-r from-purple-900/30 to-pink-900/30 border border-purple-500/30 p-5 rounded-xl relative">
                             <button
-                                onClick={() => setAiSuggestion(null)}
+                                onClick={() => setAiSuggestions(null)}
                                 className="absolute top-3 right-3 text-gray-500 hover:text-white transition-colors"
                             >
                                 ✕
                             </button>
                             <div className="flex items-start gap-3">
-                                <div className="w-10 h-10 rounded-full bg-purple-500/20 flex items-center justify-center flex-shrink-0">
+                                <div className="w-10 h-10 rounded-full bg-purple-500/20 flex items-center justify-center flex-shrink-0 mt-0.5">
                                     <svg className="w-5 h-5 text-purple-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                                         <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
                                     </svg>
                                 </div>
-                                <div>
-                                    <h3 className="text-white font-bold text-sm mb-1">
-                                        AI Consultant Suggestion: <span className="text-purple-400 capitalize">{aiSuggestion.name}</span>
+                                <div className="flex-1 min-w-0">
+                                    <h3 className="text-white font-bold text-sm mb-2">
+                                        AI Consultant added {aiSuggestions.length} Pokémon to your team:
                                     </h3>
-                                    <p className="text-gray-400 text-xs leading-relaxed">{aiSuggestion.reason}</p>
+                                    <div className="flex flex-col gap-2">
+                                        {aiSuggestions.map((s, i) => (
+                                            <div key={i} className="flex items-start gap-2">
+                                                <span className="text-purple-400 font-bold capitalize text-xs shrink-0">{s.name}</span>
+                                                <span className="text-gray-400 text-xs leading-relaxed">— {s.reason}</span>
+                                            </div>
+                                        ))}
+                                    </div>
                                 </div>
                             </div>
                         </div>
@@ -208,7 +216,9 @@ export default function Dashboard({ auth, loadTeam }) {
                     <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4 sm:gap-6 mb-8">
                         {team.map((slot, idx) => {
                             const enrichedData = reportCard?.team_data?.find(d => d.name === slot?.name);
-                            
+                            const primaryType = enrichedData?.types?.[0];
+                            const typeHex = primaryType ? TYPE_HEX[primaryType] : null;
+
                             return (
                                 <div
                                     key={idx}
@@ -217,6 +227,10 @@ export default function Dashboard({ auth, loadTeam }) {
                                             ? 'border-gray-700 hover:border-gray-500'
                                             : 'border-gray-700/50 hover:border-indigo-500/60 cursor-pointer hover:bg-gray-800/80'
                                     }`}
+                                    style={slot && typeHex ? {
+                                        background: `linear-gradient(135deg, ${typeHex}28 0%, #1f2937 100%)`,
+                                        boxShadow: `0 0 30px ${typeHex}18`,
+                                    } : undefined}
                                     onClick={() => {
                                         if (!slot) setActiveSlotIndex(idx);
                                     }}
